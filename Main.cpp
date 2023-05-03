@@ -11,6 +11,9 @@
 //  1. Fix the above issues
 //  2. Update the test to load/store a real image (so that we can also test if it's working functionally).
 
+const int warmupIterations = 100;
+const int iterations = 100;
+
 #include <stdio.h>
 #include <vcruntime.h>
 #include <windows.h>
@@ -24,6 +27,7 @@ using namespace winrt;
 using namespace Windows::AI::MachineLearning;
 
 #include "d3dx12.h"
+#include <chrono>
 
 void CreateD3D12Buffer(ID3D12Device *pDevice, const size_t size, ID3D12Resource** ppResource)
 {
@@ -76,6 +80,11 @@ int main()
     CreateD3D12Buffer(pDevice, 3 * 720 * 720 * sizeof(float), &pInput);
     CreateD3D12Buffer(pDevice, 3 * 720 * 720 * sizeof(float), &pOutput);
 
+    // Event and D3D12 Fence to manage CPU<->GPU sync (we want to keep 2 iterations in "flight")
+    HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    ID3D12Fence* pFence = nullptr;
+    pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pFence));
+
     // 4. create LearningModelDevice from command queue	
     com_ptr<ILearningModelDeviceFactoryNative> dFactory =
         get_activation_factory<LearningModelDevice, ILearningModelDeviceFactoryNative>();
@@ -116,17 +125,38 @@ int main()
     binding.Bind(model.OutputFeatures().GetAt(0).Name(), outputTensor);
 
     // 7. Run the model (schedule 100 iterations on the command queue for testing)
-    for (int i=0;i<100;i++)
+    // Warmup
+    for (int i = 1; i <= warmupIterations; i++)
+    {
         session.Evaluate(binding, L"RunId");
+        pCommandQueue->Signal(pFence, i);
+        pFence->SetEventOnCompletion(i, hEvent);    // immediately wait for the GPU results
+        DWORD retVal = WaitForSingleObject(hEvent, INFINITE);
+    }
+	
 
-    // 8. Wait for the GPU
-    HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    ID3D12Fence* pFence = nullptr;
-    pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pFence));
-    //Adds fence to queue
-    pCommandQueue->Signal(pFence, 1);
-    pFence->SetEventOnCompletion(1, hEvent);
+    // Actual run for benchmarking
+
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++)
+    {
+        session.Evaluate(binding, L"RunId");
+        pCommandQueue->Signal(pFence, i + 1);
+
+        // wait for (i-2)nd iteration (so that we have 2 iterations in flight)
+        if (i > 1)
+        {
+            pFence->SetEventOnCompletion(i - 1, hEvent);
+            DWORD retVal = WaitForSingleObject(hEvent, INFINITE);
+        }
+    }
+
+    // Wait for the last iteration
+    pFence->SetEventOnCompletion(iterations, hEvent);
     DWORD retVal = WaitForSingleObject(hEvent, INFINITE);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    double duration = std::chrono::duration<double, std::milli>(end - start).count();
 
     // 9. Release d3d12 objects
     pFence->Release();
@@ -135,7 +165,6 @@ int main()
     pCommandQueue->Release();
     pDevice->Release();
 
-    printf("\nInference loop done\n");
-
+    printf("\nInference loop done. %d iterations in %g ms - avg: %g ms per iteration\n", iterations, duration, duration/iterations);
     return 0;
 }

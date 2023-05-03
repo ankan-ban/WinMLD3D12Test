@@ -26,37 +26,8 @@ const int iterations = 100;
 using namespace winrt;
 using namespace Windows::AI::MachineLearning;
 
-#include "d3dx12.h"
+#include "Common.h"
 #include <chrono>
-
-void CreateD3D12Buffer(ID3D12Device *pDevice, const size_t size, ID3D12Resource** ppResource)
-{
-    D3D12_RESOURCE_DESC bufferDesc = {};
-    bufferDesc.MipLevels = 1;
-    bufferDesc.Format = DXGI_FORMAT_UNKNOWN;
-    bufferDesc.Width = size;
-    bufferDesc.Height = 1;
-    bufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    bufferDesc.DepthOrArraySize = 1;
-    bufferDesc.SampleDesc.Count = 1;
-    bufferDesc.SampleDesc.Quality = 0;
-    bufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    bufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-    HRESULT hr = pDevice->CreateCommittedResource(
-        &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-        D3D12_HEAP_FLAG_NONE,
-        &bufferDesc,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        nullptr,
-        IID_PPV_ARGS(ppResource));
-
-    if (FAILED(hr))
-    {
-        printf("\nFailed creating a resource\n");
-        exit(0);
-    }
-}
 
 int main()
 {
@@ -79,6 +50,7 @@ int main()
     // 3. Create d3d12 resources (to be used for input and output of the network)
     CreateD3D12Buffer(pDevice, 3 * 720 * 720 * sizeof(float), &pInput);
     CreateD3D12Buffer(pDevice, 3 * 720 * 720 * sizeof(float), &pOutput);
+    uploadInputImageToD3DResource(pDevice, pCommandQueue, pInput, "input.png");
 
     // Event and D3D12 Fence to manage CPU<->GPU sync (we want to keep 2 iterations in "flight")
     HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -158,7 +130,10 @@ int main()
     auto end = std::chrono::high_resolution_clock::now();
     double duration = std::chrono::duration<double, std::milli>(end - start).count();
 
-    // 9. Release d3d12 objects
+    // save the output to disk
+    saveOutputImageFromD3DResource(pDevice, pCommandQueue, pOutput, "output.png");
+	
+    // 8. Release d3d12 objects
     pFence->Release();
     pInput->Release();
     pOutput->Release();

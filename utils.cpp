@@ -169,4 +169,6 @@ HRESULT saveOutputImageFromD3DResource(ID3D12Device* pDevice, ID3D12CommandQueue
     pReadbackRes->Release();
 
     lodepng_encode32_file(imageFileName, &image[0], width, height);
+
+    return S_OK;
 }

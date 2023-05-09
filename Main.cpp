@@ -3,13 +3,6 @@
 // Goals:
 //   - Avoid CPU <-> GPU transfers at each inference (TODO: also demonstrate how to use d3d12 copy queue to pipeline the copies)
 //   - pipeline multiple inference requests to keep GPU occupied all the time.
-// 
-// Currently none of the above work :-/
-// WinML runtime seems to block each session.Evaluate() call, and also copy the outputs to CPU internally
-// 
-// TODO: 
-//  1. Fix the above issues
-//  2. Update the test to load/store a real image (so that we can also test if it's working functionally).
 
 const int warmupIterations = 100;
 const int iterations = 100;
@@ -19,12 +12,11 @@ const int iterations = 100;
 #include <windows.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.AI.MachineLearning.h>
-#include <windows.ai.machinelearning.native.h>
+#include <winrt/Microsoft.AI.MachineLearning.h>
+#include <microsoft.ai.machinelearning.native.h>
 
 
-using namespace winrt;
-using namespace Windows::AI::MachineLearning;
+using namespace winrt::Microsoft::AI::MachineLearning;
 
 #include "Common.h"
 #include <chrono>
@@ -58,9 +50,9 @@ int main()
     pDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&pFence));
 
     // 4. create LearningModelDevice from command queue	
-    com_ptr<ILearningModelDeviceFactoryNative> dFactory =
-        get_activation_factory<LearningModelDevice, ILearningModelDeviceFactoryNative>();
-    com_ptr<::IUnknown> spLearningDevice;
+    winrt::com_ptr<ILearningModelDeviceFactoryNative> dFactory =
+        winrt::get_activation_factory<LearningModelDevice, ILearningModelDeviceFactoryNative>();
+    winrt::com_ptr<::IUnknown> spLearningDevice;
     hr = dFactory->CreateFromD3D12CommandQueue(pCommandQueue, spLearningDevice.put());
     LearningModelDevice pWinMLDevice = spLearningDevice.as<LearningModelDevice>();
 
@@ -70,13 +62,8 @@ int main()
     LearningModelSessionOptions options = {};
     // Important - always specify/override all named dimensions
     // (By default they are set to 1, but DML optimizations get turned off if a model
-    //  has dynamic dimensions that are not explicitly specified).
-    // This just crashes! TODO: figure out why?
-    /*
     auto name = L"None";
     options.OverrideNamedDimension(name, (uint32_t)1);
-    */
-    options.BatchSizeOverride(1);       // What does this mean - given we can override anything using above API?
     options.CloseModelOnSessionCreation(true);
 
     LearningModelSession session(model, LearningModelDevice(pWinMLDevice), options);
@@ -85,22 +72,29 @@ int main()
     // 6. Create WinML tensor Objects out of d3d12 resources and bind them to the model.
     TensorFloat inputTensor(nullptr), outputTensor(nullptr);
 
-    com_ptr<ITensorStaticsNative> tensorfactory = get_activation_factory<TensorFloat, ITensorStaticsNative>();
-    com_ptr<::IUnknown> spUnkTensor;
+    winrt::com_ptr<ITensorStaticsNative> tensorfactory = winrt::get_activation_factory<TensorFloat, ITensorStaticsNative>();
+    winrt::com_ptr<::IUnknown> spUnkTensor;
     int64_t shapes[4] = { 1, 3, 720, 720 };
     hr = tensorfactory->CreateFromD3D12Resource(pInput, shapes, 4, spUnkTensor.put());
     spUnkTensor.try_as(inputTensor);
     hr = tensorfactory->CreateFromD3D12Resource(pOutput, shapes, 4, spUnkTensor.put());
     spUnkTensor.try_as(outputTensor);
 
-    binding.Bind(model.InputFeatures().GetAt(0).Name(), inputTensor);
-    binding.Bind(model.OutputFeatures().GetAt(0).Name(), outputTensor);
+    // Use *Undocumented* property 'DisableTensorCpuSync' to avoid copying back data from GPU
+    winrt::Windows::Foundation::Collections::PropertySet bindProperties;
+    bindProperties.Insert(L"DisableTensorCpuSync", winrt::Windows::Foundation::PropertyValue::CreateBoolean(true));
+    binding.Bind(model.InputFeatures().GetAt(0).Name(), inputTensor, bindProperties);
+
+    bindProperties.Insert(L"DisableTensorCpuSync", winrt::Windows::Foundation::PropertyValue::CreateBoolean(true));
+    binding.Bind(model.OutputFeatures().GetAt(0).Name(), outputTensor, bindProperties);
+
 
     // 7. Run the model (schedule 100 iterations on the command queue for testing)
+    // 
     // Warmup
     for (int i = 1; i <= warmupIterations; i++)
     {
-        session.Evaluate(binding, L"RunId");
+        session.EvaluateAsync(binding, L"");
         pCommandQueue->Signal(pFence, i);
         pFence->SetEventOnCompletion(i, hEvent);    // immediately wait for the GPU results
         DWORD retVal = WaitForSingleObject(hEvent, INFINITE);
@@ -108,11 +102,10 @@ int main()
 	
 
     // Actual run for benchmarking
-
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iterations; i++)
     {
-        session.Evaluate(binding, L"RunId");
+        session.EvaluateAsync(binding, L"");
         pCommandQueue->Signal(pFence, i + 1);
 
         // wait for (i-2)nd iteration (so that we have 2 iterations in flight)

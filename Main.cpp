@@ -109,7 +109,7 @@ int main()
         pCommandQueue->Signal(pFence, i + 1);
 
         // wait for (i-2)nd iteration (so that we have 2 iterations in flight)
-        if (i > 1)
+        if ((i > 1) && (pFence->GetCompletedValue() < (i - 1)))
         {
             pFence->SetEventOnCompletion(i - 1, hEvent);
             DWORD retVal = WaitForSingleObject(hEvent, INFINITE);
